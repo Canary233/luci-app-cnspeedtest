@@ -54,15 +54,16 @@ jobs:
         run: |
           set -euo pipefail
           cd sdk
-          printf '%s\n' \
-            'src-git packages https://github.com/openwrt/packages.git' \
-            'src-git luci https://github.com/openwrt/luci.git' \
-            > feeds.conf.default
-          ./scripts/feeds update packages luci
-          ./scripts/feeds install golang
-          ./scripts/feeds install luci-base
+          sed -i \
+            -e 's#https://git.openwrt.org/feed/packages.git#https://github.com/openwrt/packages.git#' \
+            -e 's#https://git.openwrt.org/project/luci.git#https://github.com/openwrt/luci.git#' \
+            feeds.conf.default
+          grep '^src-git .* base ' feeds.conf.default
+          ./scripts/feeds update base packages luci
+          ./scripts/feeds install lua golang luci-base rpcd jsonfilter
           ln -s "${GITHUB_WORKSPACE}/cnspeedtest" package/cnspeedtest
           ln -s "${GITHUB_WORKSPACE}/luci-app-cnspeedtest" package/luci-app-cnspeedtest
+          test -f package/feeds/base/lua/Makefile
           test -f feeds/packages/lang/golang/golang-package.mk
           test -f feeds/luci/luci.mk
           test -f package/feeds/luci/luci-base/Makefile
