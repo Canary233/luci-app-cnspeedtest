@@ -1,0 +1,13 @@
+{
+  "admin/services/cnspeedtest": {
+    "title": "宽带测速",
+    "order": 90,
+    "action": {
+      "type": "view",
+      "path": "cnspeedtest/index"
+    },
+    "depends": {
+      "acl": [ "luci-app-cnspeedtest" ]
+    }
+  }
+}
