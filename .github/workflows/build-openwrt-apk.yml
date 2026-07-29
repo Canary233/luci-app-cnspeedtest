@@ -12,6 +12,9 @@ on:
       - "luci-app-cnspeedtest/**"
       - "version.mk"
 
+permissions:
+  contents: write
+
 jobs:
   build:
     name: ${{ matrix.name }}
@@ -116,3 +119,72 @@ jobs:
         with:
           name: cnspeedtest-openwrt-${{ matrix.name }}-apk
           path: artifacts/${{ matrix.name }}/*
+
+  release:
+    name: 发布 Release
+    needs: build
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@v4
+
+      - name: 下载所有 APK
+        uses: actions/download-artifact@v4
+        with:
+          pattern: cnspeedtest-openwrt-*-apk
+          path: downloaded
+
+      - name: 准备 Release 附件
+        id: version
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^CNSPEEDTEST_VERSION:=//p' version.mk)"
+          if [ -z "${version}" ]; then
+            echo "无法从 version.mk 读取版本号" >&2
+            exit 1
+          fi
+
+          mkdir release
+          for arch in aarch64 x86_64; do
+            source_dir="downloaded/cnspeedtest-openwrt-${arch}-apk"
+            test -d "${source_dir}"
+            while IFS= read -r -d '' apk; do
+              filename="$(basename "${apk}" .apk)-${arch}.apk"
+              cp "${apk}" "release/${filename}"
+            done < <(find "${source_dir}" -maxdepth 1 -type f -name '*.apk' -print0)
+          done
+
+          count="$(find release -maxdepth 1 -type f -name '*.apk' | wc -l)"
+          if [ "${count}" -ne 4 ]; then
+            echo "Release 附件数量异常，期望 4 个 APK，实际 ${count} 个" >&2
+            find downloaded -type f -print
+            exit 1
+          fi
+
+          (cd release && sha256sum *.apk > sha256sums.txt)
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: 创建或更新 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          tag="v${VERSION}"
+          title="CnSpeedtest ${tag}"
+
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            gh release edit "${tag}" \
+              --title "${title}" \
+              --draft=false \
+              --prerelease=false \
+              --latest
+            gh release upload "${tag}" release/* --clobber
+          else
+            gh release create "${tag}" release/* \
+              --target "${GITHUB_SHA}" \
+              --title "${title}" \
+              --generate-notes \
+              --latest
+          fi
