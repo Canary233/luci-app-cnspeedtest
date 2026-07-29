@@ -1,0 +1,103 @@
+name: 构建 OpenWrt APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - ".github/workflows/build-openwrt-apk.yml"
+      - "cnspeedtest/**"
+      - "luci-app-cnspeedtest/**"
+      - "version.mk"
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: aarch64
+            target: armsr/armv8
+          - name: x86_64
+            target: x86/64
+
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@v4
+
+      - name: 安装构建依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang flex bison g++ gawk gcc-multilib gettext git libncurses-dev libssl-dev python3 python3-setuptools rsync unzip zlib1g-dev file wget curl zstd
+
+      - name: 下载 OpenWrt snapshot SDK
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          base_url="https://downloads.openwrt.org/snapshots/targets/${TARGET}/"
+          sdk_file="$(curl -fsSL "${base_url}" | grep -oE 'openwrt-sdk-[^"]+Linux-x86_64\.tar\.zst' | head -n1 || true)"
+          if [ -z "${sdk_file}" ]; then
+            echo "未找到 SDK: ${base_url}" >&2
+            exit 1
+          fi
+          curl -fL "${base_url}${sdk_file}" -o sdk.tar.zst
+          mkdir sdk
+          tar --zstd -xf sdk.tar.zst -C sdk --strip-components=1
+
+      - name: 配置 feeds
+        run: |
+          set -euo pipefail
+          cd sdk
+          printf '%s\n' \
+            'src-git packages https://git.openwrt.org/feed/packages.git' \
+            'src-git luci https://git.openwrt.org/project/luci.git' \
+            "src-link cnspeedtest ${GITHUB_WORKSPACE}" \
+            > feeds.conf.default
+          ./scripts/feeds update packages luci cnspeedtest
+          ./scripts/feeds install cnspeedtest
+          ./scripts/feeds install luci-app-cnspeedtest
+          ls -la package/feeds/cnspeedtest
+          test -f package/feeds/cnspeedtest/cnspeedtest/Makefile
+          test -f package/feeds/cnspeedtest/luci-app-cnspeedtest/Makefile
+
+      - name: 选择 luci-app-cnspeedtest
+        run: |
+          cd sdk
+          printf '%s\n' \
+            'CONFIG_PACKAGE_cnspeedtest=m' \
+            'CONFIG_PACKAGE_luci-app-cnspeedtest=m' \
+            >> .config
+          make defconfig
+
+      - name: 编译 APK
+        run: |
+          cd sdk
+          make package/feeds/cnspeedtest/cnspeedtest/compile V=s
+          make package/feeds/cnspeedtest/luci-app-cnspeedtest/compile V=s
+
+      - name: 收集 APK
+        env:
+          ARCH_NAME: ${{ matrix.name }}
+        run: |
+          set -euo pipefail
+          mkdir -p "artifacts/${ARCH_NAME}"
+          find sdk/bin/packages -type f \( -name 'cnspeedtest*.apk' -o -name 'luci-app-cnspeedtest*.apk' \) -print -exec cp -f {} "artifacts/${ARCH_NAME}/" \;
+          count="$(find "artifacts/${ARCH_NAME}" -type f -name '*.apk' | wc -l)"
+          if [ "${count}" -eq 0 ]; then
+            echo "未生成 APK 产物" >&2
+            find sdk/bin/packages -type f | sort
+            exit 1
+          fi
+          sha256sum "artifacts/${ARCH_NAME}"/*.apk > "artifacts/${ARCH_NAME}/sha256sums.txt"
+
+      - name: 上传 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: cnspeedtest-openwrt-${{ matrix.name }}-apk
+          path: artifacts/${{ matrix.name }}/*

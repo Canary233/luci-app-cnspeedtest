@@ -11,6 +11,7 @@
 ```sh
 echo 'src-git cnspeedtest https://github.com/Canary233/luci-app-cnspeedtest.git' >> feeds.conf.default
 ./scripts/feeds update cnspeedtest
+./scripts/feeds install cnspeedtest
 ./scripts/feeds install luci-app-cnspeedtest
 make menuconfig
 ```
