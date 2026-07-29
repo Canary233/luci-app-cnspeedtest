@@ -50,21 +50,22 @@ jobs:
           mkdir sdk
           tar --zstd -xf sdk.tar.zst -C sdk --strip-components=1
 
-      - name: 配置 feeds
+      - name: 配置 OpenWrt feeds 和本地软件包
         run: |
           set -euo pipefail
           cd sdk
           printf '%s\n' \
-            'src-git packages https://git.openwrt.org/feed/packages.git' \
-            'src-git luci https://git.openwrt.org/project/luci.git' \
-            "src-link cnspeedtest ${GITHUB_WORKSPACE}" \
+            'src-git packages https://github.com/openwrt/packages.git' \
+            'src-git luci https://github.com/openwrt/luci.git' \
             > feeds.conf.default
-          ./scripts/feeds update packages luci cnspeedtest
-          ./scripts/feeds install cnspeedtest
-          ./scripts/feeds install luci-app-cnspeedtest
-          ls -la package/feeds/cnspeedtest
-          test -f package/feeds/cnspeedtest/cnspeedtest/Makefile
-          test -f package/feeds/cnspeedtest/luci-app-cnspeedtest/Makefile
+          ./scripts/feeds update packages luci
+          ./scripts/feeds install golang
+          ln -s "${GITHUB_WORKSPACE}/cnspeedtest" package/cnspeedtest
+          ln -s "${GITHUB_WORKSPACE}/luci-app-cnspeedtest" package/luci-app-cnspeedtest
+          test -f feeds/packages/lang/golang/golang-package.mk
+          test -f feeds/luci/luci.mk
+          test -f package/cnspeedtest/Makefile
+          test -f package/luci-app-cnspeedtest/Makefile
 
       - name: 选择 luci-app-cnspeedtest
         run: |
@@ -78,8 +79,8 @@ jobs:
       - name: 编译 APK
         run: |
           cd sdk
-          make package/feeds/cnspeedtest/cnspeedtest/compile V=s
-          make package/feeds/cnspeedtest/luci-app-cnspeedtest/compile V=s
+          make package/cnspeedtest/compile V=s
+          make package/luci-app-cnspeedtest/compile V=s
 
       - name: 收集 APK
         env:
