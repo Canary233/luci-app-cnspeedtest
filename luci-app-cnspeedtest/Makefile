@@ -5,9 +5,20 @@ PKG_NAME:=luci-app-cnspeedtest
 PKG_VERSION:=$(or $(CNSPEEDTEST_VERSION),0.1.0)
 PKG_RELEASE:=1
 
-LUCI_TITLE:=CnSpeedtest LuCI interface
-LUCI_DEPENDS:=+cnspeedtest +rpcd +jsonfilter
-LUCI_PKGARCH:=all
+include $(INCLUDE_DIR)/package.mk
+
+define Package/luci-app-cnspeedtest
+  SECTION:=luci
+  CATEGORY:=LuCI
+  SUBMENU:=3. Applications
+  TITLE:=CnSpeedtest LuCI interface
+  DEPENDS:=+cnspeedtest +luci-base +rpcd +jsonfilter
+  PKGARCH:=all
+endef
+
+define Package/luci-app-cnspeedtest/description
+LuCI web interface for CnSpeedtest.
+endef
 
 define Package/$(PKG_NAME)/postinst
 #!/bin/sh
@@ -27,6 +38,12 @@ define Package/$(PKG_NAME)/prerm
 exit 0
 endef
 
-include $(TOPDIR)/feeds/luci/luci.mk
+define Build/Compile
+endef
 
-# luci.mk handles the package build/install flow.
+define Package/luci-app-cnspeedtest/install
+	$(INSTALL_DIR) $(1)
+	$(CP) ./root/. $(1)/
+endef
+
+$(eval $(call BuildPackage,luci-app-cnspeedtest))

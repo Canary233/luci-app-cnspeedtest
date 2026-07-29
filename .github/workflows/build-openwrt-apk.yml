@@ -60,10 +60,12 @@ jobs:
             > feeds.conf.default
           ./scripts/feeds update packages luci
           ./scripts/feeds install golang
+          ./scripts/feeds install luci-base
           ln -s "${GITHUB_WORKSPACE}/cnspeedtest" package/cnspeedtest
           ln -s "${GITHUB_WORKSPACE}/luci-app-cnspeedtest" package/luci-app-cnspeedtest
           test -f feeds/packages/lang/golang/golang-package.mk
           test -f feeds/luci/luci.mk
+          test -f package/feeds/luci/luci-base/Makefile
           test -f package/cnspeedtest/Makefile
           test -f package/luci-app-cnspeedtest/Makefile
 
@@ -78,9 +80,20 @@ jobs:
 
       - name: 编译 APK
         run: |
+          set -o pipefail
           cd sdk
-          make package/cnspeedtest/compile V=s
-          make package/luci-app-cnspeedtest/compile V=s
+          make package/cnspeedtest/compile V=s 2>&1 | tee ../build-cnspeedtest.log
+          make package/luci-app-cnspeedtest/compile V=s 2>&1 | tee ../build-luci-app-cnspeedtest.log
+
+      - name: 输出失败摘要
+        if: failure()
+        run: |
+          for log in build-*.log; do
+            [ -f "${log}" ] || continue
+            echo "::group::${log} 最后 100 行"
+            tail -n 100 "${log}"
+            echo "::endgroup::"
+          done
 
       - name: 收集 APK
         env:
