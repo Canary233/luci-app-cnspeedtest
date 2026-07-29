@@ -1,0 +1,15 @@
+{
+  "luci-app-cnspeedtest": {
+    "description": "允许访问宽带测速",
+    "read": {
+      "ubus": {
+        "cnspeedtest": [ "interfaces", "nodes" ]
+      }
+    },
+    "write": {
+      "ubus": {
+        "cnspeedtest": [ "run", "start", "status", "stop" ]
+      }
+    }
+  }
+}

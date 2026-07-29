@@ -1,0 +1,190 @@
+name: 构建 OpenWrt APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - ".github/workflows/build-openwrt-apk.yml"
+      - "cnspeedtest/**"
+      - "luci-app-cnspeedtest/**"
+      - "version.mk"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: aarch64
+            target: armsr/armv8
+          - name: x86_64
+            target: x86/64
+
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@v4
+
+      - name: 安装构建依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang flex bison g++ gawk gcc-multilib gettext git libncurses-dev libssl-dev python3 python3-setuptools rsync unzip zlib1g-dev file wget curl zstd
+
+      - name: 下载 OpenWrt snapshot SDK
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          base_url="https://downloads.openwrt.org/snapshots/targets/${TARGET}/"
+          sdk_file="$(curl -fsSL "${base_url}" | grep -oE 'openwrt-sdk-[^"]+Linux-x86_64\.tar\.zst' | head -n1 || true)"
+          if [ -z "${sdk_file}" ]; then
+            echo "未找到 SDK: ${base_url}" >&2
+            exit 1
+          fi
+          curl -fL "${base_url}${sdk_file}" -o sdk.tar.zst
+          mkdir sdk
+          tar --zstd -xf sdk.tar.zst -C sdk --strip-components=1
+
+      - name: 配置 OpenWrt feeds 和本地软件包
+        run: |
+          set -euo pipefail
+          cd sdk
+          sed -i \
+            -e 's#https://git.openwrt.org/feed/packages.git#https://github.com/openwrt/packages.git#' \
+            -e 's#https://git.openwrt.org/project/luci.git#https://github.com/openwrt/luci.git#' \
+            feeds.conf.default
+          grep '^src-git .* base ' feeds.conf.default
+          ./scripts/feeds update base packages luci
+          ./scripts/feeds install lua golang luci-base rpcd jsonfilter
+          ln -s "${GITHUB_WORKSPACE}/cnspeedtest" package/cnspeedtest
+          ln -s "${GITHUB_WORKSPACE}/luci-app-cnspeedtest" package/luci-app-cnspeedtest
+          test -f package/feeds/base/lua/Makefile
+          test -f feeds/packages/lang/golang/golang-package.mk
+          test -f feeds/luci/luci.mk
+          test -f package/feeds/luci/luci-base/Makefile
+          test -f package/cnspeedtest/Makefile
+          test -f package/luci-app-cnspeedtest/Makefile
+
+      - name: 选择 luci-app-cnspeedtest
+        run: |
+          cd sdk
+          printf '%s\n' \
+            'CONFIG_PACKAGE_cnspeedtest=m' \
+            'CONFIG_PACKAGE_luci-app-cnspeedtest=m' \
+            >> .config
+          make defconfig
+
+      - name: 编译 APK
+        run: |
+          set -o pipefail
+          cd sdk
+          make package/cnspeedtest/compile V=s 2>&1 | tee ../build-cnspeedtest.log
+          make package/luci-app-cnspeedtest/compile V=s 2>&1 | tee ../build-luci-app-cnspeedtest.log
+
+      - name: 输出失败摘要
+        if: failure()
+        run: |
+          for log in build-*.log; do
+            [ -f "${log}" ] || continue
+            echo "::group::${log} 最后 100 行"
+            tail -n 100 "${log}"
+            echo "::endgroup::"
+          done
+
+      - name: 收集 APK
+        env:
+          ARCH_NAME: ${{ matrix.name }}
+        run: |
+          set -euo pipefail
+          mkdir -p "artifacts/${ARCH_NAME}"
+          find sdk/bin/packages -type f \( -name 'cnspeedtest*.apk' -o -name 'luci-app-cnspeedtest*.apk' \) -print -exec cp -f {} "artifacts/${ARCH_NAME}/" \;
+          count="$(find "artifacts/${ARCH_NAME}" -type f -name '*.apk' | wc -l)"
+          if [ "${count}" -eq 0 ]; then
+            echo "未生成 APK 产物" >&2
+            find sdk/bin/packages -type f | sort
+            exit 1
+          fi
+          sha256sum "artifacts/${ARCH_NAME}"/*.apk > "artifacts/${ARCH_NAME}/sha256sums.txt"
+
+      - name: 上传 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: cnspeedtest-openwrt-${{ matrix.name }}-apk
+          path: artifacts/${{ matrix.name }}/*
+
+  release:
+    name: 发布 Release
+    needs: build
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@v4
+
+      - name: 下载所有 APK
+        uses: actions/download-artifact@v4
+        with:
+          pattern: cnspeedtest-openwrt-*-apk
+          path: downloaded
+
+      - name: 准备 Release 附件
+        id: version
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^CNSPEEDTEST_VERSION:=//p' version.mk)"
+          if [ -z "${version}" ]; then
+            echo "无法从 version.mk 读取版本号" >&2
+            exit 1
+          fi
+
+          mkdir release
+          for arch in aarch64 x86_64; do
+            source_dir="downloaded/cnspeedtest-openwrt-${arch}-apk"
+            test -d "${source_dir}"
+            while IFS= read -r -d '' apk; do
+              filename="$(basename "${apk}" .apk)-${arch}.apk"
+              cp "${apk}" "release/${filename}"
+            done < <(find "${source_dir}" -maxdepth 1 -type f -name '*.apk' -print0)
+          done
+
+          count="$(find release -maxdepth 1 -type f -name '*.apk' | wc -l)"
+          if [ "${count}" -ne 4 ]; then
+            echo "Release 附件数量异常，期望 4 个 APK，实际 ${count} 个" >&2
+            find downloaded -type f -print
+            exit 1
+          fi
+
+          (cd release && sha256sum *.apk > sha256sums.txt)
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: 创建或更新 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          tag="v${VERSION}"
+          title="CnSpeedtest ${tag}"
+
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            gh release edit "${tag}" \
+              --title "${title}" \
+              --draft=false \
+              --prerelease=false \
+              --latest
+            gh release upload "${tag}" release/* --clobber
+          else
+            gh release create "${tag}" release/* \
+              --target "${GITHUB_SHA}" \
+              --title "${title}" \
+              --generate-notes \
+              --latest
+          fi

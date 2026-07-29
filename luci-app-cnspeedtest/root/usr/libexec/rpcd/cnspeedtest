@@ -1,0 +1,267 @@
+#!/bin/sh
+
+BIN="$(command -v cnspeedtest 2>/dev/null || true)"
+[ -n "$BIN" ] || BIN="/usr/bin/cnspeedtest"
+[ -n "$BIN" ] || BIN="/bin/cnspeedtest"
+
+json_escape() {
+	printf '%s' "$1" | sed ':a;N;$!ba;s/\\/\\\\/g; s/"/\\"/g; s/\r//g; s/\n/\\n/g'
+}
+
+json_value() {
+	jsonfilter -s "$1" -e "@.$2" 2>/dev/null
+}
+
+clamp_int() {
+	value="$1"
+	default="$2"
+	min="$3"
+	max="$4"
+	case "$value" in
+		''|*[!0-9]*) value="$default" ;;
+	esac
+	[ "$value" -lt "$min" ] && value="$min"
+	[ "$value" -gt "$max" ] && value="$max"
+	printf '%s' "$value"
+}
+
+is_true() {
+	case "$1" in
+		1|true|TRUE|yes|on) return 0 ;;
+	esac
+	return 1
+}
+
+valid_id() {
+	case "$1" in
+		''|*[!A-Za-z0-9_.-]*) return 1 ;;
+	esac
+	return 0
+}
+
+job_path() {
+	printf '/tmp/cnspeedtest-%s.%s' "$1" "$2"
+}
+
+list_interfaces() {
+	printf '{"interfaces":['
+	first=1
+	for path in /sys/class/net/*; do
+		[ -e "$path/ifindex" ] || continue
+		name="${path##*/}"
+		[ "$name" = "lo" ] && continue
+		case "$name" in
+			*'"'*|*'\'*) continue ;;
+		esac
+		[ "$first" -eq 0 ] && printf ','
+		first=0
+		printf '{"name":"%s","title":"%s"}' "$name" "$name"
+	done
+	printf ']}\n'
+}
+
+list_nodes() {
+	input="$(cat)"
+	iface="$(json_value "$input" interface)"
+
+	set -- "$BIN" -list-nodes -json
+	if [ -n "$iface" ]; then
+		case "$iface" in
+			*[!A-Za-z0-9_.:@-]*)
+				printf '{"code":2,"error":"接口名称无效"}\n'
+				return
+				;;
+		esac
+		set -- "$@" -I "$iface"
+	fi
+
+	output="$("$@" 2>&1)"
+	code="$?"
+	if [ "$code" -eq 0 ] && printf '%s' "$output" | grep -q '^[[:space:]]*\['; then
+		printf '{"code":0,"nodes":%s}\n' "$output"
+	else
+		printf '{"code":%s,"error":"%s"}\n' "$code" "$(json_escape "$output")"
+	fi
+}
+
+run_test() {
+	input="$(cat)"
+	iface="$(json_value "$input" interface)"
+	duration="$(clamp_int "$(json_value "$input" duration)" 8 1 30)"
+	down_threads="$(clamp_int "$(json_value "$input" download_threads)" 8 1 32)"
+	up_threads="$(clamp_int "$(json_value "$input" upload_threads)" 4 1 32)"
+	host="$(json_value "$input" host)"
+	port="$(clamp_int "$(json_value "$input" port)" 65499 1 65535)"
+	name="$(json_value "$input" name)"
+	no_download="$(json_value "$input" no_download)"
+	no_upload="$(json_value "$input" no_upload)"
+
+	if [ ! -x "$BIN" ]; then
+		printf '{"code":127,"error":"未找到可执行文件：%s"}\n' "$BIN"
+		return
+	fi
+
+	set -- "$BIN" -json -duration "$duration" -download-threads "$down_threads" -upload-threads "$up_threads"
+	if [ -n "$iface" ]; then
+		case "$iface" in
+			*[!A-Za-z0-9_.:@-]*)
+				printf '{"code":2,"error":"接口名称无效"}\n'
+				return
+				;;
+		esac
+		set -- "$@" -I "$iface"
+	fi
+	if [ -n "$host" ]; then
+		case "$host" in
+			*[!A-Za-z0-9_.:-]*)
+				printf '{"code":2,"error":"节点地址无效"}\n'
+				return
+				;;
+		esac
+		set -- "$@" -host "$host" -port "$port"
+		if [ -n "$name" ]; then
+			set -- "$@" -name "$name"
+		fi
+	fi
+	if is_true "$no_download"; then
+		set -- "$@" -no-download
+	fi
+	if is_true "$no_upload"; then
+		set -- "$@" -no-upload
+	fi
+
+	output="$("$@" 2>&1)"
+	code="$?"
+	if [ "$code" -eq 0 ] && printf '%s' "$output" | grep -q '^[[:space:]]*{'; then
+		printf '{"code":0,"result":%s}\n' "$output"
+	else
+		printf '{"code":%s,"error":"%s"}\n' "$code" "$(json_escape "$output")"
+	fi
+}
+
+start_test() {
+	input="$(cat)"
+	iface="$(json_value "$input" interface)"
+	duration="$(clamp_int "$(json_value "$input" duration)" 8 1 30)"
+	down_threads="$(clamp_int "$(json_value "$input" download_threads)" 8 1 32)"
+	up_threads="$(clamp_int "$(json_value "$input" upload_threads)" 4 1 32)"
+	host="$(json_value "$input" host)"
+	port="$(clamp_int "$(json_value "$input" port)" 65499 1 65535)"
+	name="$(json_value "$input" name)"
+	no_download="$(json_value "$input" no_download)"
+	no_upload="$(json_value "$input" no_upload)"
+
+	if [ ! -x "$BIN" ]; then
+		printf '{"code":127,"error":"未找到可执行文件：%s"}\n' "$BIN"
+		return
+	fi
+
+	id="$(date +%s)-$$"
+	log="$(job_path "$id" ndjson)"
+	errlog="$(job_path "$id" err)"
+	pidfile="$(job_path "$id" pid)"
+	rm -f "$log" "$errlog" "$pidfile"
+
+	set -- "$BIN" -progress-json -duration "$duration" -download-threads "$down_threads" -upload-threads "$up_threads"
+	if [ -n "$iface" ]; then
+		case "$iface" in
+			*[!A-Za-z0-9_.:@-]*)
+				printf '{"code":2,"error":"接口名称无效"}\n'
+				return
+				;;
+		esac
+		set -- "$@" -I "$iface"
+	fi
+	if [ -n "$host" ]; then
+		case "$host" in
+			*[!A-Za-z0-9_.:-]*)
+				printf '{"code":2,"error":"节点地址无效"}\n'
+				return
+				;;
+		esac
+		set -- "$@" -host "$host" -port "$port"
+		if [ -n "$name" ]; then
+			set -- "$@" -name "$name"
+		fi
+	fi
+	if is_true "$no_download"; then
+		set -- "$@" -no-download
+	fi
+	if is_true "$no_upload"; then
+		set -- "$@" -no-upload
+	fi
+
+	(
+		"$@" >"$log" 2>"$errlog"
+		code="$?"
+		if [ "$code" -ne 0 ]; then
+			errtext="$(cat "$errlog" 2>/dev/null)"
+			printf '{"type":"error","code":%s,"error":"%s"}\n' "$code" "$(json_escape "$errtext")" >>"$log"
+		fi
+	) &
+	printf '%s\n' "$!" >"$pidfile"
+	printf '{"code":0,"id":"%s"}\n' "$id"
+}
+
+status_test() {
+	input="$(cat)"
+	id="$(json_value "$input" id)"
+	if ! valid_id "$id"; then
+		printf '{"code":2,"error":"任务 ID 无效"}\n'
+		return
+	fi
+	log="$(job_path "$id" ndjson)"
+	pidfile="$(job_path "$id" pid)"
+	running=false
+	if [ -s "$pidfile" ]; then
+		pid="$(cat "$pidfile" 2>/dev/null)"
+		case "$pid" in
+			''|*[!0-9]*) ;;
+			*)
+				if kill -0 "$pid" 2>/dev/null; then
+					running=true
+				fi
+				;;
+		esac
+	fi
+	text=""
+	if [ -f "$log" ]; then
+		text="$(cat "$log" 2>/dev/null)"
+	fi
+	printf '{"code":0,"running":%s,"log":"%s"}\n' "$running" "$(json_escape "$text")"
+}
+
+stop_test() {
+	input="$(cat)"
+	id="$(json_value "$input" id)"
+	if ! valid_id "$id"; then
+		printf '{"code":2,"error":"任务 ID 无效"}\n'
+		return
+	fi
+	pidfile="$(job_path "$id" pid)"
+	if [ -s "$pidfile" ]; then
+		pid="$(cat "$pidfile" 2>/dev/null)"
+		case "$pid" in
+			''|*[!0-9]*) ;;
+			*) kill "$pid" 2>/dev/null ;;
+		esac
+	fi
+	printf '{"code":0}\n'
+}
+
+case "$1" in
+	list)
+		printf '{"interfaces":{},"nodes":{"interface":"String"},"run":{"interface":"String","duration":"Integer","download_threads":"Integer","upload_threads":"Integer","no_download":"Boolean","no_upload":"Boolean","host":"String","port":"Integer","name":"String"},"start":{"interface":"String","duration":"Integer","download_threads":"Integer","upload_threads":"Integer","no_download":"Boolean","no_upload":"Boolean","host":"String","port":"Integer","name":"String"},"status":{"id":"String"},"stop":{"id":"String"}}\n'
+		;;
+	call)
+		case "$2" in
+			interfaces) list_interfaces ;;
+			nodes) list_nodes ;;
+			run) run_test ;;
+			start) start_test ;;
+			status) status_test ;;
+			stop) stop_test ;;
+			*) printf '{"error":"未知方法"}\n' ;;
+		esac
+		;;
+esac
