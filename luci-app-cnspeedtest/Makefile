@@ -44,6 +44,7 @@ endef
 define Package/luci-app-cnspeedtest/install
 	$(INSTALL_DIR) $(1)
 	$(CP) ./root/. $(1)/
+	chmod 0755 $(1)/usr/libexec/rpcd/cnspeedtest
 endef
 
 $(eval $(call BuildPackage,luci-app-cnspeedtest))
